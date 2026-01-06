@@ -1,117 +1,152 @@
-Here is the script with all user-facing prints and prompts translated to English. Only messages were changed; logic and structure are unchanged.
 
 #!/usr/bin/env python3
 """
-Minimal interactive CLI: Insert, View all, Delete.
-ChaCha20-Poly1305 + direct SHA-256 password -> key (NOT recommended for high-security).
-AAD = SHA256(previous ciphertext) (32 zero bytes for first).
+Minimal CLI encrypted notebook.
+Features: Insert, View (requires decryption), Delete notes.
+Encryption: ChaCha20-Poly1305
+Key: Direct SHA-256(password) (Demonstration only, not for high security)
+Chaining AAD: SHA256(previous ciphertext), 32 zero bytes for the first.
 """
-import sqlite3, os, getpass, sys
+import sqlite3
+import os
+import getpass
+import sys
 from Crypto.Cipher import ChaCha20_Poly1305
 from Crypto.Hash import SHA256
 from Crypto.Random import get_random_bytes
-DATABASE_FILENAME = 'notebook.db'  # database filename
-def derive_key_from_password_sha256():  # derive key by hashing password with SHA-256
-    password_text = getpass.getpass('Enter notebook password: ')  # prompt hidden in terminal
-    password_hash = SHA256.new(password_text.encode('utf-8'))  # hash password
-    return password_hash.digest()  # return 32-byte key
-def initialize_database(connection):  # create table if not exists
-    connection.execute('''CREATE TABLE IF NOT EXISTS notes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        ciphertext BLOB NOT NULL,
-        tag BLOB NOT NULL,
-        nonce BLOB NOT NULL
-    )''')
-    connection.commit()
-def fetch_all_notes(connection):  # fetch all notes ordered by id
-    return connection.execute("SELECT id, ciphertext, tag, nonce FROM notes ORDER BY id ASC").fetchall()
-def insert_encrypted_note(connection, symmetric_key, plaintext_bytes):  # insert encrypted note
-    existing_rows = fetch_all_notes(connection)  # get existing rows
-    previous_cipher_hash = bytes(32)  # initial AAD = 32 zero bytes
-    for row in existing_rows:
-        row_identifier, row_ciphertext, row_tag, row_nonce = row  # unpack row
-        previous_cipher_hash = SHA256.new(row_ciphertext).digest()  # set prev hash to last ciphertext's SHA-256
-    random_nonce = get_random_bytes(12)  # generate 12-byte nonce
-    cipher = ChaCha20_Poly1305.new(key=symmetric_key, nonce=random_nonce)  # create cipher
-    cipher.update(previous_cipher_hash)  # set AAD
-    ciphertext_bytes, authentication_tag = cipher.encrypt_and_digest(plaintext_bytes)  # encrypt and get tag
-    connection.execute(
-        "INSERT INTO notes (ciphertext, tag, nonce) VALUES (?, ?, ?)",
-        (ciphertext_bytes, authentication_tag, random_nonce)
-    )  # store
-    connection.commit()
-    print("Inserted.")  # confirmation
-def view_and_verify_all_notes(connection, symmetric_key):  # decrypt and display all notes, verify chain
-    rows = fetch_all_notes(connection)
-    previous_cipher_hash = bytes(32)
-    if not rows:
-        print("No notes.")  # nothing to show
+DATABASE_FILENAME = 'notebook.db'
+def derive_key_from_password():
+    """Derive a 32-byte symmetric key using SHA-256 hash of the user's password."""
+    try:
+        password = getpass.getpass('Enter notebook master password: ')
+    except Exception as e:
+        print("Failed to read password:", e)
+        sys.exit(1)
+    return SHA256.new(password.encode('utf-8')).digest()
+def ensure_database_directory(filepath):
+    """Ensure the database directory exists; create if it doesn't."""
+    directory = os.path.dirname(os.path.abspath(filepath))
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory)
+
+
+def initialize_database(connection):
+    """Create the notes table if it doesn't exist."""
+    with connection:
+        connection.execute('''CREATE TABLE IF NOT EXISTS notes (
+                               id INTEGER PRIMARY KEY AUTOINCREMENT,
+                               ciphertext BLOB NOT NULL,
+                               tag BLOB NOT NULL,
+                               nonce BLOB NOT NULL
+                             )''')
+
+def fetch_all_notes(connection):
+    """Fetch all notes, ordered by id."""
+    with connection:
+        return connection.execute(
+            "SELECT id, ciphertext, tag, nonce FROM notes ORDER BY id ASC"
+        ).fetchall()
+
+
+def insert_encrypted_note(connection, key, plaintext_bytes):
+    """
+    Encrypt and insert a new note.
+    Uses chain-mode AAD: AAD is SHA-256 hash of previous ciphertext (zero for first note).
+    """
+    notes = fetch_all_notes(connection)
+    aad = bytes(32)  # 32 zero bytes for the first note
+    for row in notes:
+        aad = SHA256.new(row[1]).digest()  # row[1] = ciphertext of last note
+
+    nonce = get_random_bytes(12)
+    cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
+    cipher.update(aad)
+    ciphertext, tag = cipher.encrypt_and_digest(plaintext_bytes)
+    with connection:
+        connection.execute(
+            "INSERT INTO notes (ciphertext, tag, nonce) VALUES (?, ?, ?)",
+            (ciphertext, tag, nonce)
+        )
+    print("Note inserted.")
+def view_and_verify_all_notes(connection, key):
+    """
+    Decrypt and display all notes, verifying each authentication tag and chain-AAD.
+    Stops if tampering or password error is detected.
+    """
+    notes = fetch_all_notes(connection)
+    if not notes:
+        print("== No notes ==")
         return
-    for index, row in enumerate(rows, start=1):
-        row_identifier, row_ciphertext, row_tag, row_nonce = row  # unpack row
-        cipher = ChaCha20_Poly1305.new(key=symmetric_key, nonce=row_nonce)  # create cipher with stored nonce
-        cipher.update(previous_cipher_hash)  # provide AAD
+    aad = bytes(32)
+    for idx, (note_id, ciphertext, tag, nonce) in enumerate(notes, 1):
+        cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)
+        cipher.update(aad)
         try:
-            plaintext_bytes = cipher.decrypt_and_verify(row_ciphertext, row_tag)  # decrypt and verify
-            print(f"Note {index} (id={row_identifier}):\n{plaintext_bytes.decode('utf-8')}\n" + "-"*30)  # print note
+            plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+            print(f"[{idx}] (id={note_id}):\n{plaintext.decode('utf-8', errors='replace')}\n{'-'*36}")
         except ValueError:
-            print(f"Tampering detected at note {index} (id={row_identifier}). Aborting view.")  # auth failed
+            print(f"Tampering or password error detected at note {idx} (id={note_id}). Display stopped.")
             return
-        previous_cipher_hash = SHA256.new(row_ciphertext).digest()  # update prev hash
-def delete_note_by_identifier(connection):  # delete a note by id
-    input_identifier = input("Enter note id to delete: ").strip()
-    if not input_identifier.isdigit():
+        aad = SHA256.new(ciphertext).digest()
+def delete_note_by_id(connection):
+    """Prompt user for note id and delete the specified note."""
+    note_id_input = input("Enter the note id to delete: ").strip()
+    if not note_id_input.isdigit():
         print("Invalid id.")
         return
-    note_identifier = int(input_identifier)
-    existence_check = connection.execute("SELECT 1 FROM notes WHERE id=?", (note_identifier,)).fetchone()  # check existence
-    if not existence_check:
-        print("Not found.")
-        return
-    confirm = input(f"Delete id={note_identifier}? (y/N): ").strip().lower()
-    if confirm == 'y':
-        connection.execute("DELETE FROM notes WHERE id=?", (note_identifier,))  # perform deletion
-        connection.commit()
-        print("Deleted.")
-    else:
-        print("Canceled.")
-def print_menu():  # show menu
-    print("\n1 Insert note\n2 View all notes (decrypt)\n3 Delete note\n4 Quit")
-def main():
-    symmetric_key = derive_key_from_password_sha256()  # derive key from password
-    connection = sqlite3.connect(DATABASE_FILENAME)  # open database
-    initialize_database(connection)  # ensure table exists
-    while True:
-        print_menu()
-        choice = input("Choice: ").strip()
-        if choice == '1':
-            print("Enter multiple lines, a single line with END to finish, empty line to cancel:")  # prompt for multiline input
-            input_lines = []
-            while True:
-                try:
-                    current_line = input()
-                except EOFError:
-                    break
-                if current_line == "END":
-                    break
-                if current_line == "":
-                    input_lines = []
-                    break
-                input_lines.append(current_line)
-            if not input_lines:
-                print("Canceled.")
-                continue
-            insert_encrypted_note(connection, symmetric_key, ("\n".join(input_lines)).encode('utf-8'))  # insert joined lines
-        elif choice == '2':
-            view_and_verify_all_notes(connection, symmetric_key)  # view all
-        elif choice == '3':
-            delete_note_by_identifier(connection)  # delete by id
-        elif choice == '4':
-            connection.close()
-            print("Bye.")
-            sys.exit(0)
+    note_id = int(note_id_input)
+    with connection:
+        exists = connection.execute("SELECT 1 FROM notes WHERE id=?", (note_id,)).fetchone()
+        if not exists:
+            print("Note not found.")
+            return
+        confirm = input(f"Are you sure you want to delete id={note_id}? (y/N): ").strip().lower()
+        if confirm == 'y':
+            connection.execute("DELETE FROM notes WHERE id=?", (note_id,))
+            print("Note deleted.")
         else:
-            print("Invalid choice.")
+            print("Canceled.")
+def print_menu():
+    """Display the main menu options."""
+    print("\n1. Insert note")
+    print("2. View all notes")
+    print("3. Delete note")
+    print("4. Quit")
+def main():
+    ensure_database_directory(DATABASE_FILENAME)
+    key = derive_key_from_password()
+    with sqlite3.connect(DATABASE_FILENAME) as connection:
+        initialize_database(connection)
+        while True:
+            print_menu()
+            choice = input("Enter your choice: ").strip()
+            if choice == '1':
+                print("Enter your note (multiple lines, type END on a new line to finish, or press Enter to cancel):")
+                lines = []
+                while True:
+                    try:
+                        line = input()
+                    except EOFError:
+                        break
+                    if line == "END":
+                        break
+                    if line == "":
+                        lines = []
+                        break
+                    lines.append(line)
+                if not lines:
+                    print("Canceled.")
+                    continue
+                plaintext = '\n'.join(lines).encode('utf-8')
+                insert_encrypted_note(connection, key, plaintext)
+            elif choice == '2':
+                view_and_verify_all_notes(connection, key)
+            elif choice == '3':
+                delete_note_by_id(connection)
+            elif choice == '4':
+                print("Goodbye.")
+                break
+            else:
+                print("Invalid choice.")
 if __name__ == '__main__':
     main()
-You're welcome.
