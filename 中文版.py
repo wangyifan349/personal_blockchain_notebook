@@ -108,7 +108,6 @@ def menu():
 6. 验证区块链完整性
 7. 退出
 8. 查询指定公钥签名的区块
-9. 使用LCS模糊搜索区块内容
 ====================================================
 """)
 def create_block(data, prev_hash, wallet):
@@ -120,17 +119,6 @@ def create_block(data, prev_hash, wallet):
     pubkey = wallet.get_public_key()
     return Block(data, prev_hash, block_hash, sign, pubkey)
 
-def longest_common_subsequence(a, b):
-    """ 返回字符串a和b的最长公共子序列长度 """
-    m, n = len(a), len(b)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
-    for i in range(m):
-        for j in range(n):
-            if a[i] == b[j]:
-                dp[i + 1][j + 1] = dp[i][j] + 1
-            else:
-                dp[i + 1][j + 1] = max(dp[i][j + 1], dp[i + 1][j])
-    return dp[m][n]
 def check_chain(blocks):
     """ 验证整条链的签名、哈希和连接关系 """
     if not blocks:
@@ -159,7 +147,7 @@ def main():
     while True:
         menu()
         try:
-            cmd = input("请选择菜单功能（1-9）：").strip()
+            cmd = input("请选择菜单功能（1-8）：").strip()
         except (KeyboardInterrupt, EOFError):
             print("\n程序已退出。")
             break
@@ -236,26 +224,6 @@ def main():
                     found = True
             if not found:
                 print("未找到该公钥签名的区块。")
-        elif cmd == "9":
-            keyword = input("请输入用于LCS模糊搜索的关键字：").strip()
-            blocks = db.get_blocks()
-            if not check_chain(blocks):
-                print("链校验不通过，终止搜索。")
-                continue
-            score_blocks = []
-            for idx in range(len(blocks)):
-                block = blocks[idx]
-                lcs = longest_common_subsequence(block.data, keyword)
-                if lcs > 0:
-                    score_blocks.append((lcs, idx, block))
-            score_blocks.sort(key=lambda x: (-x[0], x[1]))
-            if len(score_blocks) == 0:
-                print("未查找到相关区块。")
-            else:
-                print(f'与"{keyword}"相关区块，LCS长度排序：')
-                for sb in score_blocks:
-                    print(f'[LCS长度: {sb[0]}]')
-                    sb[2].display(sb[1])
         else:
             print("输入无效，请重试。")
 if __name__ == '__main__':
